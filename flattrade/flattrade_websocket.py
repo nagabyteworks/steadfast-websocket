@@ -2,20 +2,24 @@ import asyncio
 import websockets
 import json
 import logging
-from config import FLATTRADE_WEBSOCKET_DATA_ENDPOINT, WS_HOST
+from config import FLATTRADE_WEBSOCKET_DATA_ENDPOINT, WS_HOST, WS_ALLOWED_ORIGIN, WEBSOCKET_INTERNAL_TOKEN
 from NorenRestApiPy.NorenApi import NorenApi
 import requests
 import time
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
+logging.getLogger("NorenRestApiPy.NorenApi").setLevel(logging.WARNING)
 
 # Flag to tell us if the websocket is open
 socket_opened = False
+broker_ready = None
+broker_disconnected = None
+AUTH_TIMEOUT_SECONDS = 20
 
 
 # Event handlers
 def event_handler_order_update(message):
-    print("order event: " + str(message))
+    logging.info("Broker order update received")
 
 
 def event_handler_quote_update(message):
@@ -46,7 +50,13 @@ async def print_quote_data():
 async def get_credentials_and_security_ids():
     try:
         response = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: requests.get(FLATTRADE_WEBSOCKET_DATA_ENDPOINT)
+            None,
+            lambda: requests.get(
+                FLATTRADE_WEBSOCKET_DATA_ENDPOINT,
+                headers={"X-Steadfast-Internal-Token": WEBSOCKET_INTERNAL_TOKEN}
+                if WEBSOCKET_INTERNAL_TOKEN else {},
+                timeout=5,
+            ),
         )
         response.raise_for_status()
         data = response.json()
@@ -79,12 +89,19 @@ async def setup_api_connection(usersession, userid):
 
     if ret is not None:
         # Start the websocket
-        ret = api.start_websocket(
+        result = api.start_websocket(
             order_update_callback=event_handler_order_update,
             subscribe_callback=event_handler_quote_update,
-            socket_open_callback=open_callback,  # No parameters needed
+            socket_open_callback=open_callback,
+            socket_close_callback=close_callback,
+            socket_error_callback=error_callback,
         )
-        print(ret)
+        if result is False:
+            raise RuntimeError("Broker WebSocket did not start")
+        try:
+            await asyncio.wait_for(broker_ready.wait(), timeout=AUTH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as error:
+            raise RuntimeError("Flattrade WebSocket authentication was not acknowledged") from error
     else:
         raise Exception("Failed to set up API session")
 
@@ -92,10 +109,21 @@ async def setup_api_connection(usersession, userid):
 def open_callback():
     global socket_opened
     socket_opened = True
+    loop.call_soon_threadsafe(broker_ready.set)
     print("app is connected")
 
     # Optionally, you can log or perform other actions here
     # without subscribing to hardcoded symbols
+
+
+def close_callback():
+    if not loop.is_closed():
+        loop.call_soon_threadsafe(broker_disconnected.set)
+
+
+def error_callback(error):
+    logging.error("Flattrade WebSocket reported an error")
+    close_callback()
 
 
 quote_queue = asyncio.Queue()
@@ -152,49 +180,78 @@ async def handle_websocket_message(websocket, message):
         global usersession, userid
         usersession = data.get("usersession", "")
         userid = data.get("userid", "")
-        print(
-            f"Updated credentials and security IDs: {usersession[:5]}...{usersession[-5:]}, {userid[:2]}....{userid[-2:]}"
-        )
+        print("Updated credentials")
 
 
 def initialize_api():
     global api
     try:
         api = NorenApi(
-            host="https://piconnect.flattrade.in/PiConnectTP/",
-            websocket="wss://piconnect.flattrade.in/PiConnectWSTp/",
+            host="https://piconnect.flattrade.in/PiConnectAPI/",
+            websocket="wss://piconnect.flattrade.in/PiConnectWSAPI/",
             eodhost="https://web.flattrade.in/chartApi/getdata/",
         )
     except TypeError:
         # If 'eodhost' is not accepted, try without it
         api = NorenApi(
-            host="https://piconnect.flattrade.in/PiConnectTP/",
-            websocket="wss://piconnect.flattrade.in/PiConnectWSTp/",
+            host="https://piconnect.flattrade.in/PiConnectAPI/",
+            websocket="wss://piconnect.flattrade.in/PiConnectWSAPI/",
         )
 
 
 async def main(port):
-    global loop
+    global loop, broker_ready, broker_disconnected, socket_opened
     loop = asyncio.get_running_loop()
+    broker_ready = asyncio.Event()
+    broker_disconnected = asyncio.Event()
+    socket_opened = False
 
+    print_task = None
+    server = None
+    server_task = None
+    disconnect_task = None
+    session_started = False
     try:
         logging.info(f"Starting Flattrade WebSocket on port {port}...")
         usersession, userid = await wait_for_data()
-        logging.info(
-            f"Using usersession: {usersession[:5]}...{usersession[-5:]}, userid: {userid[:2]}....{userid[-2:]}"
-        )
+        logging.info("Broker session received")
+        session_started = True
         await setup_api_connection(usersession, userid)
 
         # Create the print_quote_data task
         print_task = asyncio.create_task(print_quote_data())
 
-        server = await websockets.serve(websocket_server, WS_HOST, port)
-        await server.wait_closed()
+        server = await websockets.serve(
+            websocket_server, WS_HOST, port,
+            origins=[WS_ALLOWED_ORIGIN] if WS_ALLOWED_ORIGIN else None,
+        )
+        server_task = asyncio.create_task(server.wait_closed())
+        disconnect_task = asyncio.create_task(broker_disconnected.wait())
+        done, _ = await asyncio.wait(
+            [server_task, disconnect_task], return_when=asyncio.FIRST_COMPLETED
+        )
+        if disconnect_task in done:
+            raise RuntimeError("Flattrade WebSocket disconnected")
+        await server_task
     except Exception as e:
         logging.error(f"An error occurred in Flattrade WebSocket: {e}")
+        raise
     finally:
-        # Cancel the print_task when the server closes
-        print_task.cancel()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        for task in (server_task, disconnect_task):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (server_task, disconnect_task) if task is not None),
+            return_exceptions=True,
+        )
+        if print_task is not None:
+            print_task.cancel()
+            await asyncio.gather(print_task, return_exceptions=True)
+        if session_started:
+            await asyncio.to_thread(api.close_websocket)
 
 
 if __name__ == "__main__":

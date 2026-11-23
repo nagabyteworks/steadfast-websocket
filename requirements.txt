@@ -1,5 +1,5 @@
 websockets
 websocket_client
 requests
-NorenRestApi
+NorenRestApi @ https://raw.githubusercontent.com/flattrade/pythonAPI/388ee7ed03fdce43afbea9480d17f3d58b3aba9e/dist/norenrestapi-0.0.30-py3-none-any.whl#sha256=665a0a1de2754eb356e30708beb7d8a81ffb04d44375bdbe4e58342eaf8113a4
 python-dotenv

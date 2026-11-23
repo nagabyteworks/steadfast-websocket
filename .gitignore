@@ -1,5 +1,18 @@
-/flattrade/__pycache__/api_helper.cpython-312.pyc
-/shoonya/__pycache__/api_helper.cpython-312.pyc
-*/__pycache__
-/__pycache__
+# Python environments and generated files
+.venv/
 venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+*.log
+.DS_Store
+
+# Local configuration and private keys
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.key
+*.p12
+*.pfx

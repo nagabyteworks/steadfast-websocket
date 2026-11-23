@@ -2,12 +2,12 @@ import asyncio
 import websockets
 import json
 import logging
-from config import SHOONYA_WEBSOCKET_DATA_ENDPOINT, WS_HOST
+from config import SHOONYA_WEBSOCKET_DATA_ENDPOINT, WS_HOST, WS_ALLOWED_ORIGIN, WEBSOCKET_INTERNAL_TOKEN
 from NorenRestApiPy.NorenApi import NorenApi
 import requests
 import time
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 # Flag to tell us if the websocket is open
 socket_opened = False
@@ -15,7 +15,7 @@ socket_opened = False
 
 # Event handlers
 def event_handler_order_update(message):
-    print("order event: " + str(message))
+    logging.info("Broker order update received")
 
 
 def event_handler_quote_update(message):
@@ -46,7 +46,13 @@ async def print_quote_data():
 async def get_credentials_and_security_ids():
     try:
         response = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: requests.get(SHOONYA_WEBSOCKET_DATA_ENDPOINT)
+            None,
+            lambda: requests.get(
+                SHOONYA_WEBSOCKET_DATA_ENDPOINT,
+                headers={"X-Steadfast-Internal-Token": WEBSOCKET_INTERNAL_TOKEN}
+                if WEBSOCKET_INTERNAL_TOKEN else {},
+                timeout=5,
+            ),
         )
         response.raise_for_status()
         data = response.json()
@@ -79,12 +85,13 @@ async def setup_api_connection(usersession, userid):
 
     if ret is not None:
         # Start the websocket
-        ret = api.start_websocket(
+        result = api.start_websocket(
             order_update_callback=event_handler_order_update,
             subscribe_callback=event_handler_quote_update,
             socket_open_callback=open_callback,  # No parameters needed
         )
-        print(ret)
+        if result is False:
+            raise RuntimeError("Broker WebSocket did not start")
     else:
         raise Exception("Failed to set up API session")
 
@@ -152,33 +159,43 @@ async def handle_websocket_message(websocket, message):
         global usersession, userid
         usersession = data.get("usersession", "")
         userid = data.get("userid", "")
-        print(
-            f"Updated credentials and security IDs: {usersession[:5]}...{usersession[-5:]}, {userid[:2]}....{userid[-2:]}"
-        )
+        print("Updated credentials")
 
 
 async def main(port):
     global loop
     loop = asyncio.get_running_loop()
 
+    print_task = None
+    server = None
+    session_started = False
     try:
         logging.info(f"Starting Shoonya WebSocket on port {port}...")
         usersession, userid = await wait_for_data()
-        logging.info(
-            f"Using usersession: {usersession[:5]}...{usersession[-5:]}, userid: {userid[:2]}....{userid[-2:]}"
-        )
+        logging.info("Broker session received")
+        session_started = True
         await setup_api_connection(usersession, userid)
 
         # Create the print_quote_data task
         print_task = asyncio.create_task(print_quote_data())
 
-        server = await websockets.serve(websocket_server, WS_HOST, port)
+        server = await websockets.serve(
+            websocket_server, WS_HOST, port,
+            origins=[WS_ALLOWED_ORIGIN] if WS_ALLOWED_ORIGIN else None,
+        )
         await server.wait_closed()
     except Exception as e:
         logging.error(f"An error occurred in Shoonya WebSocket: {e}")
+        raise
     finally:
-        # Cancel the print_task when the server closes
-        print_task.cancel()
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+        if print_task is not None:
+            print_task.cancel()
+            await asyncio.gather(print_task, return_exceptions=True)
+        if session_started:
+            await asyncio.to_thread(api.close_websocket)
 
 
 def initialize_api():
