@@ -3,7 +3,8 @@ import re
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-load_dotenv()
+if os.getenv("ENV") != "production":
+    load_dotenv()
 
 # Determine the environment
 ENV = os.getenv("ENV")

@@ -20,6 +20,14 @@ class ProductionConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid environment"):
             self.load_config(ENV="")
 
+    def test_production_does_not_load_repository_dotenv(self):
+        with patch("dotenv.load_dotenv") as load_dotenv:
+            self.load_config(
+                ENV="production",
+                API_BASE_URL="http://127.0.0.1:3001",
+            )
+        load_dotenv.assert_not_called()
+
     def test_loopback_api_and_websocket_host(self):
         config = self.load_config(
             ENV="production",
