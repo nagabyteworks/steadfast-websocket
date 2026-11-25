@@ -56,6 +56,34 @@ class EvaluateTests(unittest.TestCase):
         evaluate(t, 121)
         self.assertEqual(t["slPrice"], 120.0)
 
+    def test_static_stop_and_target_for_short_positions(self):
+        r = rule(side="short", slPrice=110.0, targetPrice=80.0)
+        self.assertEqual(evaluate(r, 100), (False, None))
+        self.assertEqual(evaluate(r, 110), (False, "Stop-loss"))
+        self.assertEqual(evaluate(r, 80), (False, "Target"))
+
+    def test_static_rule_never_moves_its_stop(self):
+        r = rule(targetPrice=120.0)
+        self.assertEqual(evaluate(r, 115), (False, None))
+        self.assertEqual(r["slPrice"], 90.0)
+
+    def test_trailing_stop_for_short_positions(self):
+        r = rule(side="short", slPrice=110.0, mode="trailing_sl", slPoints=10.0)
+        self.assertEqual(evaluate(r, 85), (True, None))
+        self.assertEqual(r["slPrice"], 95.0)
+        self.assertEqual(evaluate(r, 90), (False, None))
+        self.assertEqual(r["slPrice"], 95.0)
+        self.assertEqual(evaluate(r, 95), (False, "Stop-loss"))
+
+    def test_trailing_stop_still_exits_at_target(self):
+        r = rule(mode="trailing_sl", slPoints=10.0, targetPrice=120.0)
+        self.assertEqual(evaluate(r, 120), (True, "Target"))
+
+    def test_target_trail_does_not_move_before_target(self):
+        r = rule(mode="target_trail", targetPrice=120.0, trailPoints=5.0)
+        self.assertEqual(evaluate(r, 110), (False, None))
+        self.assertEqual((r["slPrice"], r["targetPrice"]), (90.0, 120.0))
+
 
 class MonitorTests(unittest.TestCase):
     def test_rule_triggers_once_and_keeps_local_progress_for_same_rev(self):
@@ -73,6 +101,20 @@ class MonitorTests(unittest.TestCase):
         monitor.sync([rule()])
         monitor.sync([rule(slPrice=95.0, rev=2)])
         self.assertEqual(monitor.rules["NIFTYCE"]["slPrice"], 95.0)
+
+    def test_trailing_progress_is_reported_once_and_ignores_other_tokens(self):
+        monitor = RiskMonitor()
+        monitor.sync([rule(mode="trailing_sl", slPoints=10.0)])
+        self.assertEqual(monitor.on_quote("999", 150.0), [])
+        monitor.on_quote("123", 115.0)
+        self.assertEqual(monitor.take_dirty()[0]["slPrice"], 105.0)
+        self.assertEqual(monitor.take_dirty(), [])
+
+    def test_triggered_rule_is_not_reported_as_dirty(self):
+        monitor = RiskMonitor()
+        monitor.sync([rule(mode="trailing_sl", slPoints=10.0, targetPrice=120.0)])
+        self.assertEqual(len(monitor.on_quote("123", 125.0)), 1)
+        self.assertEqual(monitor.take_dirty(), [])
 
 
 if __name__ == "__main__":
