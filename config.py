@@ -1,13 +1,16 @@
 import os
 import re
+from pathlib import Path
 from urllib.parse import urlparse
 from dotenv import load_dotenv
 
-if os.getenv("ENV") != "production":
-    load_dotenv()
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
-# Determine the environment
-ENV = os.getenv("ENV")
+PROFILE = (os.getenv("PROFILE") or os.getenv("profile") or "prod").strip().lower()
+if PROFILE not in ("dev", "prod"):
+    raise ValueError("profile must be dev or prod")
+
+ENV = "development" if PROFILE == "dev" else "production"
 
 if ENV == "production":
     BASE_URL = os.getenv("API_BASE_URL")
@@ -15,8 +18,6 @@ if ENV == "production":
         raise ValueError("API_BASE_URL is required in production")
 elif ENV == "development":
     BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:3000")
-else:
-    raise ValueError(f"Invalid environment: {ENV}")
 
 api_url = urlparse(BASE_URL)
 if (
