@@ -52,6 +52,7 @@ SHOONYA_WS_PORT = read_port("SHOONYA_WS_PORT", 8766)
 
 # API Endpoints
 FLATTRADE_WEBSOCKET_DATA_ENDPOINT = f"{BASE_URL}/flattrade/websocketData"
+FLATTRADE_RISK_ENDPOINT = f"{BASE_URL}/flattrade/risk/internal"
 SHOONYA_WEBSOCKET_DATA_ENDPOINT = f"{BASE_URL}/shoonya/websocketData"
 
 # WebSocket server settings

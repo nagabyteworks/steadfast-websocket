@@ -10,7 +10,10 @@ import requests
 import websockets
 from NorenRestApiPy.NorenApi import NorenApi
 
+from risk_monitor import RiskMonitor
+
 from config import (
+    FLATTRADE_RISK_ENDPOINT,
     FLATTRADE_WEBSOCKET_DATA_ENDPOINT,
     WEBSOCKET_INTERNAL_TOKEN,
     WS_ALLOWED_ORIGIN,
@@ -26,6 +29,8 @@ MAX_RETRY_DELAY_SECONDS = 30
 STABLE_CONNECTION_SECONDS = 60
 QUOTE_QUEUE_LIMIT = 2048
 HEALTH_PUBLISH_INTERVAL_SECONDS = 5
+RISK_SYNC_INTERVAL_SECONDS = 2
+RISK_TRIGGER_ATTEMPTS = 5
 
 api = None
 loop = None
@@ -39,6 +44,8 @@ quote_data_lock = threading.Lock()
 connected_clients = set()
 client_subscriptions = {}
 subscribed_symbols = set()
+risk_monitor = RiskMonitor()
+risk_instruments = set()
 last_tick_at = None
 stream_health = {
     "authenticated": False,
@@ -258,9 +265,79 @@ def error_callback(error):
         loop.call_soon_threadsafe(_record_sdk_error, category)
 
 
+async def _risk_request(method, path, **kwargs):
+    response = await asyncio.to_thread(
+        requests.request,
+        method,
+        f"{FLATTRADE_RISK_ENDPOINT}{path}",
+        headers={"X-Steadfast-Internal-Token": WEBSOCKET_INTERNAL_TOKEN},
+        timeout=10,
+        **kwargs,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+async def _send_risk_trigger(rule, reason, ltp):
+    payload = {"tsym": rule["tsym"], "reason": reason, "ltp": float(ltp)}
+    for attempt in range(RISK_TRIGGER_ATTEMPTS):
+        try:
+            result = await _risk_request("POST", "/trigger", json=payload)
+            logging.info("Risk trigger for %s handled=%s", rule["tsym"], result.get("handled"))
+            return
+        except (requests.exceptions.RequestException, ValueError) as error:
+            logging.warning("Risk trigger for %s failed (type=%s)", rule["tsym"], type(error).__name__)
+            await asyncio.sleep(1)
+    # Nothing reached the API, so allow the next tick to request the exit again.
+    rule["triggered"] = False
+
+
+def _process_risk_quote(quote):
+    token = quote.get("tk")
+    try:
+        ltp = float(quote.get("lp"))
+    except (TypeError, ValueError):
+        return
+    for rule, reason, price in risk_monitor.on_quote(token, ltp):
+        logging.info("Risk rule hit for %s: %s at %s", rule["tsym"], reason, price)
+        asyncio.get_running_loop().create_task(_send_risk_trigger(rule, reason, price))
+
+
+def _sync_risk_subscriptions():
+    risk_instruments.clear()
+    risk_instruments.update(risk_monitor.instruments)
+    if not stream_health["authenticated"]:
+        return
+    for instrument in risk_instruments - subscribed_symbols:
+        try:
+            api.subscribe(instrument=[instrument], feed_type=2)
+            subscribed_symbols.add(instrument)
+        except Exception as error:
+            logging.warning("Risk subscription failed (%s)", type(error).__name__)
+
+
+async def _risk_sync_loop():
+    while True:
+        try:
+            for rule in risk_monitor.take_dirty():
+                await _risk_request("POST", "/progress", json={
+                    "tsym": rule["tsym"],
+                    "rev": rule["rev"],
+                    "slPrice": rule["slPrice"],
+                    "targetPrice": rule.get("targetPrice"),
+                })
+            data = await _risk_request("GET", "/rules")
+            risk_monitor.sync(data.get("rules", []))
+            _sync_risk_subscriptions()
+        except (requests.exceptions.RequestException, ValueError, AttributeError) as error:
+            logging.warning("Risk rule sync failed (type=%s)", type(error).__name__)
+        await asyncio.sleep(RISK_SYNC_INTERVAL_SECONDS)
+
+
 async def _broadcast_quote_updates():
     while True:
         quote = await quote_queue.get()
+        _process_risk_quote(quote)
         clients = tuple(connected_clients)
         if not clients:
             continue
@@ -291,7 +368,7 @@ async def _broadcast_stream_health():
 
 
 def _other_client_subscribed(symbol, exclude_client):
-    return any(
+    return symbol in risk_instruments or any(
         client is not exclude_client and symbol in symbols
         for client, symbols in client_subscriptions.items()
     )
@@ -418,6 +495,7 @@ async def _serve_authenticated_stream(port):
     quote_task = None
     health_task = None
     print_task = None
+    risk_task = None
     disconnect_task = None
     error_task = None
     server_task = None
@@ -432,6 +510,7 @@ async def _serve_authenticated_stream(port):
         quote_task = asyncio.create_task(_broadcast_quote_updates())
         health_task = asyncio.create_task(_broadcast_stream_health())
         print_task = asyncio.create_task(print_quote_data())
+        risk_task = asyncio.create_task(_risk_sync_loop())
         server_task = asyncio.create_task(server.wait_closed())
         disconnect_task = asyncio.create_task(broker_disconnected.wait())
         error_task = asyncio.create_task(broker_error_event.wait())
@@ -449,11 +528,11 @@ async def _serve_authenticated_stream(port):
         if server is not None:
             server.close()
             await server.wait_closed()
-        for task in (quote_task, health_task, print_task, server_task, disconnect_task, error_task):
+        for task in (quote_task, health_task, print_task, risk_task, server_task, disconnect_task, error_task):
             if task is not None and not task.done():
                 task.cancel()
         await asyncio.gather(
-            *(task for task in (quote_task, health_task, print_task, server_task, disconnect_task, error_task)
+            *(task for task in (quote_task, health_task, print_task, risk_task, server_task, disconnect_task, error_task)
               if task is not None),
             return_exceptions=True,
         )
