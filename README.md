@@ -6,7 +6,7 @@ To run both WebSocket servers, navigate to the steadfast-websocket directory and
 python main.py
 ```
 
-[Link to monorepo](https://github.com/narenkram/steadfast-monorepo)
+[Link to monorepo](https://github.com/nagabyteworks/steadfast-monorepo)
 
 # Join Our Telegram Channel
 
