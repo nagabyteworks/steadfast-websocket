@@ -279,7 +279,7 @@ async def _risk_request(method, path, **kwargs):
 
 
 async def _send_risk_trigger(rule, reason, ltp):
-    payload = {"tsym": rule["tsym"], "reason": reason, "ltp": float(ltp)}
+    payload = {"tsym": rule["tsym"], "rev": rule["rev"], "reason": reason, "ltp": float(ltp)}
     for attempt in range(RISK_TRIGGER_ATTEMPTS):
         try:
             result = await _risk_request("POST", "/trigger", json=payload)

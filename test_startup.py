@@ -13,6 +13,17 @@ from shoonya import shoonya_websocket
 
 
 class StartupFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_risk_trigger_includes_the_rule_revision(self):
+        request = AsyncMock(return_value={"handled": False})
+        with patch.object(flattrade_websocket, "_risk_request", request):
+            await flattrade_websocket._send_risk_trigger(
+                {"tsym": "NIFTYCE", "rev": 7}, "Stop-loss", 140
+            )
+        request.assert_awaited_once_with(
+            "POST", "/trigger",
+            json={"tsym": "NIFTYCE", "rev": 7, "reason": "Stop-loss", "ltp": 140.0}
+        )
+
     async def test_production_session_change_replaces_the_running_stream(self):
         selector = main.BrokerSelector()
         first_started = asyncio.Event()
