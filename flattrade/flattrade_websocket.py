@@ -278,6 +278,14 @@ async def _risk_request(method, path, **kwargs):
     return response.json()
 
 
+async def _notify_reconciliation_after_connect():
+    try:
+        await _risk_request("POST", "/reconcile")
+        logging.info("API reconciliation requested after broker reconnect")
+    except (requests.exceptions.RequestException, ValueError) as error:
+        logging.warning("API reconciliation reconnect signal failed (type=%s)", type(error).__name__)
+
+
 async def _send_risk_trigger(rule, reason, ltp):
     payload = {"tsym": rule["tsym"], "rev": rule["rev"], "reason": reason, "ltp": float(ltp)}
     for attempt in range(RISK_TRIGGER_ATTEMPTS):
@@ -597,6 +605,7 @@ async def main(port):
         try:
             logging.info("Broker session received from the API")
             await setup_api_connection(usersession, userid)
+            await _notify_reconciliation_after_connect()
             authenticated_at = time.monotonic()
             await _serve_authenticated_stream(port)
         except asyncio.CancelledError:

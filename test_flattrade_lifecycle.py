@@ -9,6 +9,12 @@ from flattrade import flattrade_websocket as stream
 
 
 class FlattradeLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authenticated_reconnect_requests_immediate_api_reconciliation(self):
+        request = AsyncMock(return_value={"accepted": True})
+        with patch.object(stream, "_risk_request", request):
+            await stream._notify_reconciliation_after_connect()
+        request.assert_awaited_once_with("POST", "/reconcile")
+
     async def test_authentication_rejection_is_not_treated_as_transport_failure(self):
         api = Mock()
         api.set_session.return_value = True
