@@ -303,6 +303,10 @@ def _process_risk_quote(quote):
     for rule, reason, price in risk_monitor.on_quote(token, ltp):
         logging.info("Risk rule hit for %s: %s at %s", rule["tsym"], reason, price)
         asyncio.get_running_loop().create_task(_send_risk_trigger(rule, reason, price))
+    for rule in risk_monitor.rules.values():
+        if rule.get("monitor_error") and not rule.get("monitor_error_logged"):
+            logging.error("Risk monitor cannot advance %s: %s", rule["tsym"], rule["monitor_error"])
+            rule["monitor_error_logged"] = True
 
 
 def _sync_risk_subscriptions():

@@ -104,6 +104,21 @@ class EvaluateTests(unittest.TestCase):
         self.assertEqual(evaluate(r, 110), (False, None))
         self.assertEqual((r["slPrice"], r["targetPrice"]), (90.0, 120.0))
 
+    def test_invalid_prices_never_trigger_or_update_protection(self):
+        for price in (0, -1, float("nan"), float("inf"), True):
+            r = rule(targetPrice=120.0)
+            self.assertEqual(evaluate(r, price), (False, None))
+            self.assertEqual((r["slPrice"], r["targetPrice"]), (90.0, 120.0))
+
+    def test_non_advancing_target_trail_is_reported_without_mutating_rule(self):
+        r = rule(mode="target_trail", targetPrice=120.0, trailPoints=0.001)
+        monitor = RiskMonitor()
+        monitor.sync([r])
+        self.assertEqual(monitor.on_quote("123", 120.0), [])
+        current = monitor.rules["NIFTYCE"]
+        self.assertEqual((current["slPrice"], current["targetPrice"]), (90.0, 120.0))
+        self.assertEqual(current["monitor_error"], "Invalid next target price")
+
 
 class MonitorTests(unittest.TestCase):
     def test_rule_triggers_once_and_keeps_local_progress_for_same_rev(self):

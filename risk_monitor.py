@@ -4,6 +4,8 @@ The API owns the rules and places exit orders. This module only decides, tick by
 tick, whether a rule's stop-loss moved or an exit must be requested.
 """
 
+import math
+
 
 def _sign(rule):
     return 1 if rule["side"] == "long" else -1
@@ -18,6 +20,9 @@ def evaluate(rule, ltp):
       target_trail  - target never exits; each time it is reached the stop-loss moves
                       to it and the target advances by trailPoints.
     """
+    if isinstance(ltp, bool) or not isinstance(ltp, (int, float)) or not math.isfinite(ltp) or ltp <= 0:
+        return False, None
+
     sign = _sign(rule)
     sl = rule["slPrice"]
     if sl is not None and sign * (ltp - sl) <= 0:
@@ -32,11 +37,18 @@ def evaluate(rule, ltp):
             rule["slPrice"] = candidate
             changed = True
     elif mode == "target_trail":
+        next_sl = sl
         while target is not None and sign * (ltp - target) >= 0:
-            rule["slPrice"] = target
-            target = round(target + sign * rule["trailPoints"], 2)
-            rule["targetPrice"] = target
+            next_target = round(target + sign * rule["trailPoints"], 2)
+            if (not math.isfinite(next_target) or next_target <= 0 or
+                    sign * (next_target - target) <= 0):
+                raise ValueError("Invalid next target price")
+            next_sl = target
+            target = next_target
             changed = True
+        if changed:
+            rule["slPrice"] = next_sl
+            rule["targetPrice"] = target
         return changed, None
 
     if target is not None and sign * (ltp - target) >= 0:
@@ -73,7 +85,13 @@ class RiskMonitor:
         for rule in self.rules.values():
             if rule["token"] != token or rule["triggered"]:
                 continue
-            changed, reason = evaluate(rule, ltp)
+            try:
+                changed, reason = evaluate(rule, ltp)
+            except ValueError as error:
+                if not rule.get("monitor_error_reported"):
+                    rule["monitor_error"] = str(error)
+                    rule["monitor_error_reported"] = True
+                continue
             if reason:
                 rule["triggered"] = True
                 triggers.append((rule, reason, ltp))
