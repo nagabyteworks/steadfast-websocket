@@ -283,7 +283,7 @@ async def _send_risk_trigger(rule, reason, ltp):
     for attempt in range(RISK_TRIGGER_ATTEMPTS):
         try:
             result = await _risk_request("POST", "/trigger", json=payload)
-            logging.info("Risk trigger for %s handled=%s", rule["tsym"], result.get("handled"))
+            logging.info("Risk trigger for %s handled=%s status=%s", rule["tsym"], result.get("handled"), result.get("status"))
             return
         except (requests.exceptions.RequestException, ValueError) as error:
             logging.warning("Risk trigger for %s failed (type=%s)", rule["tsym"], type(error).__name__)
@@ -298,6 +298,8 @@ def _process_risk_quote(quote):
         ltp = float(quote.get("lp"))
     except (TypeError, ValueError):
         return
+    if not isinstance(token, str):
+        return
     for rule, reason, price in risk_monitor.on_quote(token, ltp):
         logging.info("Risk rule hit for %s: %s at %s", rule["tsym"], reason, price)
         asyncio.get_running_loop().create_task(_send_risk_trigger(rule, reason, price))
@@ -307,29 +309,47 @@ def _sync_risk_subscriptions():
     risk_instruments.clear()
     risk_instruments.update(risk_monitor.instruments)
     if not stream_health["authenticated"]:
+        if risk_instruments:
+            logging.warning("Risk rules are waiting for the broker stream (instruments=%s)", sorted(risk_instruments))
         return
     for instrument in risk_instruments - subscribed_symbols:
         try:
             api.subscribe(instrument=[instrument], feed_type=2)
             subscribed_symbols.add(instrument)
+            logging.info("Risk monitor subscribed to %s", instrument)
         except Exception as error:
             logging.warning("Risk subscription failed (%s)", type(error).__name__)
 
 
 async def _risk_sync_loop():
+    last_summary = None
     while True:
         try:
             for rule in risk_monitor.take_dirty():
-                await _risk_request("POST", "/progress", json={
+                result = await _risk_request("POST", "/progress", json={
                     "tsym": rule["tsym"],
                     "rev": rule["rev"],
                     "slPrice": rule["slPrice"],
                     "targetPrice": rule.get("targetPrice"),
                 })
+                logging.info(
+                    "Risk progress pushed for %s: sl=%s target=%s applied=%s",
+                    rule["tsym"], rule["slPrice"], rule.get("targetPrice"), result.get("applied"),
+                )
             data = await _risk_request("GET", "/rules")
             risk_monitor.sync(data.get("rules", []))
             _sync_risk_subscriptions()
-        except (requests.exceptions.RequestException, ValueError, AttributeError) as error:
+            summary = sorted(
+                (rule["tsym"], rule["mode"], rule["slPrice"], rule.get("targetPrice"))
+                for rule in risk_monitor.rules.values()
+            )
+            if summary != last_summary:
+                logging.info("Watching %d risk rule(s): %s", len(summary), summary)
+                last_summary = summary
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # One bad response must never stop the loop that guards open positions.
             logging.warning("Risk rule sync failed (type=%s)", type(error).__name__)
         await asyncio.sleep(RISK_SYNC_INTERVAL_SECONDS)
 
