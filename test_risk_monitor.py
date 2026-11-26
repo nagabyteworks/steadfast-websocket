@@ -14,6 +14,26 @@ def rule(**overrides):
 
 
 class EvaluateTests(unittest.TestCase):
+    def test_reopened_long_price_paths(self):
+        fixed = rule(entry=150, slPrice=140, targetPrice=170)
+        self.assertEqual(evaluate(fixed, 140.01), (False, None))
+        self.assertEqual(evaluate(fixed, 139), (False, "Stop-loss"))
+        self.assertEqual(evaluate(fixed, 169.99), (False, None))
+        self.assertEqual(evaluate(fixed, 171), (False, "Target"))
+
+        trailing = rule(entry=150, slPrice=140, mode="trailing_sl", slPoints=10)
+        self.assertEqual(evaluate(trailing, 165), (True, None))
+        self.assertEqual(trailing["slPrice"], 155)
+        self.assertEqual(evaluate(trailing, 160), (False, None))
+        self.assertEqual(trailing["slPrice"], 155)
+        self.assertEqual(evaluate(trailing, 155), (False, "Stop-loss"))
+
+        target_trail = rule(entry=150, slPrice=140, mode="target_trail", targetPrice=170, trailPoints=5)
+        self.assertEqual(evaluate(target_trail, 169.99), (False, None))
+        self.assertEqual(evaluate(target_trail, 181), (True, None))
+        self.assertEqual((target_trail["slPrice"], target_trail["targetPrice"]), (180, 185))
+        self.assertEqual(evaluate(target_trail, 180), (False, "Stop-loss"))
+
     def test_target_trail_advances_stop_without_exiting(self):
         r = rule(mode="target_trail", targetPrice=120.0, trailPoints=5.0)
         self.assertEqual(evaluate(r, 119), (False, None))
