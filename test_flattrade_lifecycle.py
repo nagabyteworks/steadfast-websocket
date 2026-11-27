@@ -120,6 +120,57 @@ class FlattradeLifecycleTests(unittest.IsolatedAsyncioTestCase):
             result = await stream.get_credentials_and_security_ids()
         self.assertEqual(result, (None, None))
 
+    async def test_session_api_outage_backs_off_then_recovers_without_log_flooding(self):
+        requests_module = stream.requests
+        good = Mock()
+        good.json.return_value = {"usersession": "live-session", "userid": "test-user"}
+        calls = [requests_module.exceptions.ConnectionError("refused")] * 4 + [good]
+        sleeps = []
+
+        async def fake_sleep(delay):
+            sleeps.append(delay)
+
+        with patch.object(stream.requests, "get", side_effect=calls), \
+             patch.object(stream.asyncio, "sleep", fake_sleep), \
+             patch.object(stream, "_session_issue", None), \
+             self.assertLogs(level="INFO") as logs:
+            result = await stream.wait_for_data()
+
+        self.assertEqual(result, ("live-session", "test-user"))
+        self.assertEqual(len(sleeps), 4)
+        self.assertTrue(all(2 * 0.8 <= d <= 30 for d in sleeps))
+        self.assertGreater(sleeps[-1], sleeps[0])
+        unreachable = [m for m in logs.output if "unreachable" in m]
+        self.assertEqual(len(unreachable), 1)
+        self.assertTrue(any("recovered" in m for m in logs.output))
+
+    async def test_session_failures_are_distinguished_and_never_fabricated(self):
+        requests_module = stream.requests
+        http_error = Mock()
+        http_error.raise_for_status.side_effect = requests_module.exceptions.HTTPError(
+            response=Mock(status_code=503))
+        missing = Mock()
+        missing.json.return_value = {"usersession": "", "userid": ""}
+        invalid = Mock()
+        invalid.json.return_value = []
+        cases = [(http_error, "session_api_http_503"), (missing, "session_missing"),
+                 (invalid, "invalid_session_response")]
+        for response, category in cases:
+            with self.subTest(category=category), \
+                 patch.object(stream.requests, "get", return_value=response), \
+                 patch.object(stream, "_session_issue", None):
+                self.assertEqual(await stream.get_credentials_and_security_ids(), (None, None))
+                self.assertEqual(stream.get_stream_health()["lastError"], category)
+
+    async def test_expired_session_is_not_reused_while_api_returns_it(self):
+        same = Mock()
+        same.json.return_value = {"usersession": "expired", "userid": "test-user"}
+        fresh = Mock()
+        fresh.json.return_value = {"usersession": "fresh", "userid": "test-user"}
+        with patch.object(stream.requests, "get", side_effect=[same, same, fresh]), \
+             patch.object(stream.asyncio, "sleep", new=AsyncMock()):
+            self.assertEqual(await stream.wait_for_data("expired"), ("fresh", "test-user"))
+
     async def test_retry_budget_resets_when_a_rejected_session_is_replaced(self):
         wait_for_data = AsyncMock(side_effect=[
             ("first-session", "test-user"),

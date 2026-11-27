@@ -148,6 +148,31 @@ async def print_quote_data():
         logging.info("stream_health=%s", json.dumps(get_stream_health(), separators=(",", ":")))
 
 
+SESSION_POLL_MIN_SECONDS = 2
+SESSION_POLL_MAX_SECONDS = 30
+SESSION_LOG_REPEAT_SECONDS = 300
+_session_issue = None
+_session_issue_logged_at = 0.0
+
+
+def _report_session_issue(category, message, *args):
+    # Log a changed problem immediately and an unchanged one only periodically.
+    global _session_issue, _session_issue_logged_at
+    now = time.monotonic()
+    if category != _session_issue or now - _session_issue_logged_at >= SESSION_LOG_REPEAT_SECONDS:
+        logging.warning(message, *args)
+        _session_issue_logged_at = now
+    _session_issue = category
+    _health_update(connectionState="waiting_for_session", lastError=category)
+
+
+def _clear_session_issue():
+    global _session_issue
+    if _session_issue is not None:
+        logging.info("Broker session API recovered (previous issue=%s)", _session_issue)
+        _session_issue = None
+
+
 async def get_credentials_and_security_ids():
     try:
         response = await asyncio.to_thread(
@@ -163,30 +188,48 @@ async def get_credentials_and_security_ids():
         usersession = data.get("usersession")
         userid = data.get("userid")
         if isinstance(usersession, str) and usersession and isinstance(userid, str) and userid:
+            _clear_session_issue()
             return usersession, userid
+        _report_session_issue(
+            "session_missing", "Broker session API is reachable but no Flattrade session is available"
+        )
+        return None, None
+    except requests.exceptions.HTTPError as error:
+        status = error.response.status_code if error.response is not None else None
+        _report_session_issue(
+            f"session_api_http_{status}",
+            "Broker session API returned an HTTP error (status=%s)", status,
+        )
         return None, None
     except requests.exceptions.RequestException as error:
-        status = error.response.status_code if error.response is not None else None
-        logging.warning(
-            "Unable to retrieve broker session from API (type=%s, status=%s)",
+        _report_session_issue(
+            "session_api_unavailable",
+            "Broker session API is unreachable (type=%s); retrying with backoff",
             type(error).__name__,
-            status,
         )
-        _health_update(connectionState="waiting_for_session", lastError="session_api_unavailable")
         return None, None
     except ValueError as error:
-        logging.warning("Invalid broker session response (type=%s)", type(error).__name__)
-        _health_update(connectionState="waiting_for_session", lastError="invalid_session_response")
+        _report_session_issue(
+            "invalid_session_response",
+            "Invalid broker session response (type=%s)", type(error).__name__,
+        )
         return None, None
+
+
+def _session_poll_delay(attempt):
+    base = min(SESSION_POLL_MAX_SECONDS, SESSION_POLL_MIN_SECONDS * 2 ** attempt)
+    return min(SESSION_POLL_MAX_SECONDS, base * random.uniform(0.8, 1.2))
 
 
 async def wait_for_data(excluded_session=None):
     _health_update(connectionState="waiting_for_session")
+    attempt = 0
     while True:
         usersession, userid = await get_credentials_and_security_ids()
         if usersession and userid and usersession != excluded_session:
             return usersession, userid
-        await asyncio.sleep(5)
+        await asyncio.sleep(_session_poll_delay(attempt))
+        attempt += 1
 
 
 def _configure_sdk_single_attempt(api_instance):
